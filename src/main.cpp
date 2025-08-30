@@ -2,8 +2,8 @@
 #include "esp_camera.h"
 #include <WiFi.h>
 #include "esp_http_server.h"
-#include "esp_timer.h"
-#include "img_converters.h"
+#include <ArduinoJson.h>
+#include "soc/rtc_cntl_reg.h"
 
 // Camera pins for AI-Thinker ESP32-CAM
 #define PWDN_GPIO_NUM     32
@@ -23,318 +23,36 @@
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 
+// Hardware pins - CHANGED BUZZER PIN!
+#define BUZZER_PIN 13    // Changed from GPIO 12 to GPIO 2 (safe pin)
+#define LED_PIN 4       // GPIO 4 is still fine
+
 // WiFi credentials - UPDATE THESE!
 const char* ssid = "SLT FIBRE";
 const char* password = "96132005";
 
-// Motion detection variables
-bool motion_detection_enabled = true;
-int motion_count = 0;
-unsigned long last_motion_time = 0;
-static uint8_t *prev_frame = NULL;
-static size_t prev_frame_size = 0;
-
-// LED pin (built-in flash LED for motion indication)
-#define LED_PIN 4
-
 httpd_handle_t camera_httpd = NULL;
 
-// Simplified HTML interface
-static const char PROGMEM INDEX_HTML[] = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>ESP32-CAM Motion Detection</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background: #1a1a1a;
-            color: white;
-            text-align: center;
-            margin: 0;
-            padding: 20px;
-        }
-        h1 { color: #ff4444; }
-        .container { max-width: 800px; margin: 0 auto; }
-        .controls {
-            background: #333;
-            padding: 20px;
-            border-radius: 10px;
-            margin: 20px 0;
-        }
-        .switch {
-            position: relative;
-            display: inline-block;
-            width: 60px;
-            height: 34px;
-            margin: 0 10px;
-        }
-        .switch input { opacity: 0; width: 0; height: 0; }
-        .slider {
-            position: absolute;
-            cursor: pointer;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background-color: #ccc;
-            transition: .4s;
-            border-radius: 34px;
-        }
-        .slider:before {
-            position: absolute;
-            content: "";
-            height: 26px; width: 26px;
-            left: 4px; bottom: 4px;
-            background-color: white;
-            transition: .4s;
-            border-radius: 50%;
-        }
-        input:checked + .slider { background-color: #ff4444; }
-        input:checked + .slider:before { transform: translateX(26px); }
-        
-        .video-container {
-            border: 3px solid #ff4444;
-            border-radius: 10px;
-            display: inline-block;
-            position: relative;
-            margin: 20px 0;
-        }
-        #stream {
-            max-width: 100%;
-            height: auto;
-            display: block;
-        }
-        .status {
-            background: #444;
-            padding: 15px;
-            border-radius: 8px;
-            margin: 20px 0;
-            text-align: left;
-        }
-        .motion-alert {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            background: rgba(255, 68, 68, 0.9);
-            color: white;
-            padding: 10px 20px;
-            border-radius: 5px;
-            font-weight: bold;
-            display: none;
-            animation: blink 1s infinite;
-        }
-        @keyframes blink {
-            0%, 50% { opacity: 1; }
-            51%, 100% { opacity: 0.5; }
-        }
-        .stats {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            margin: 20px 0;
-        }
-        .stat-box {
-            background: #333;
-            padding: 15px;
-            border-radius: 8px;
-        }
-        .stat-value {
-            font-size: 2em;
-            color: #ff4444;
-            font-weight: bold;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🎥 ESP32-CAM Motion Detection</h1>
-        
-        <div class="controls">
-            <label><strong>Motion Detection:</strong></label>
-            <label class="switch">
-                <input type="checkbox" id="motionToggle" checked>
-                <span class="slider"></span>
-            </label>
-            <span id="toggleStatus">ON</span>
-        </div>
-        
-        <div class="video-container">
-            <img id="stream" src="/stream">
-            <div id="motionAlert" class="motion-alert">🚨 MOTION DETECTED!</div>
-        </div>
-        
-        <div class="stats">
-            <div class="stat-box">
-                <div>Total Detections</div>
-                <div class="stat-value" id="motionCount">0</div>
-            </div>
-            <div class="stat-box">
-                <div>Last Detection</div>
-                <div class="stat-value" id="lastMotion">Never</div>
-            </div>
-        </div>
-        
-        <div class="status">
-            <h3>📊 System Status</h3>
-            <p><strong>Detection Status:</strong> <span id="detectionStatus">Active</span></p>
-            <p><strong>Stream Status:</strong> <span id="streamStatus">Loading...</span></p>
-            <p><strong>Instructions:</strong> Move in front of the camera to trigger motion detection</p>
-        </div>
-    </div>
+// Alarm control variables
+bool alarm_active = false;
+unsigned long alarm_start_time = 0;
+bool buzzer_state = false;
+unsigned long last_buzzer_toggle = 0;
 
-    <script>
-        const motionToggle = document.getElementById('motionToggle');
-        const toggleStatus = document.getElementById('toggleStatus');
-        const motionAlert = document.getElementById('motionAlert');
-        const streamImg = document.getElementById('stream');
-        
-        let lastMotionCount = 0;
-        
-        // Handle stream load
-        streamImg.onload = function() {
-            document.getElementById('streamStatus').textContent = 'Active';
-        };
-        
-        streamImg.onerror = function() {
-            document.getElementById('streamStatus').textContent = 'Error - Retrying...';
-            setTimeout(() => {
-                streamImg.src = '/stream?' + Date.now();
-            }, 3000);
-        };
-        
-        // Handle motion detection toggle
-        motionToggle.addEventListener('change', function() {
-            const enabled = this.checked;
-            toggleStatus.textContent = enabled ? 'ON' : 'OFF';
-            
-            fetch(`/control?var=motion_detect&val=${enabled ? 1 : 0}`)
-            .then(response => response.text())
-            .then(() => {
-                document.getElementById('detectionStatus').textContent = enabled ? 'Active' : 'Disabled';
-            });
-        });
-        
-        // Update status every 2 seconds
-        function updateStatus() {
-            fetch('/status')
-            .then(response => response.json())
-            .then(data => {
-                document.getElementById('motionCount').textContent = data.motion_count;
-                
-                // Check for new motion detection
-                if (data.motion_count > lastMotionCount) {
-                    lastMotionCount = data.motion_count;
-                    showMotionAlert();
-                    document.getElementById('lastMotion').textContent = 'Just now';
-                }
-                
-                // Update last detection time
-                if (data.last_motion > 0) {
-                    const secondsAgo = Math.floor((Date.now() - data.last_motion) / 1000);
-                    if (secondsAgo > 60) {
-                        document.getElementById('lastMotion').textContent = Math.floor(secondsAgo / 60) + 'm ago';
-                    } else if (secondsAgo > 5) {
-                        document.getElementById('lastMotion').textContent = secondsAgo + 's ago';
-                    }
-                }
-            })
-            .catch(error => console.error('Status update failed:', error));
-        }
-        
-        function showMotionAlert() {
-            motionAlert.style.display = 'block';
-            setTimeout(() => {
-                motionAlert.style.display = 'none';
-            }, 3000);
-        }
-        
-        // Start status updates
-        setInterval(updateStatus, 2000);
-        updateStatus();
-    </script>
-</body>
-</html>
-)rawliteral";
+// Status tracking
+int total_drowsiness_alerts = 0;
+String current_detection_status = "Normal";
+unsigned long last_detection_time = 0;
 
-// Real motion detection function
-bool detectRealMotion(camera_fb_t *fb) {
-    if (!fb || fb->len == 0) return false;
-    
-    // Initialize previous frame on first run
-    if (prev_frame == NULL) {
-        prev_frame = (uint8_t*)ps_malloc(fb->len);
-        if (prev_frame == NULL) {
-            Serial.println("Failed to allocate memory for motion detection");
-            return false;
-        }
-        memcpy(prev_frame, fb->buf, fb->len);
-        prev_frame_size = fb->len;
-        return false; // No motion on first frame
-    }
-    
-    // Check if frame size changed
-    if (prev_frame_size != fb->len) {
-        free(prev_frame);
-        prev_frame = (uint8_t*)ps_malloc(fb->len);
-        if (prev_frame == NULL) return false;
-        memcpy(prev_frame, fb->buf, fb->len);
-        prev_frame_size = fb->len;
-        return false;
-    }
-    
-    // Calculate motion by comparing frames
-    uint32_t motion_pixels = 0;
-    uint32_t total_pixels = 0;
-    const uint32_t step = 50; // Sample every 50th pixel for efficiency
-    const uint8_t threshold = 15; // Motion sensitivity threshold
-    
-    for (uint32_t i = 0; i < fb->len && i < prev_frame_size; i += step) {
-        uint8_t current = fb->buf[i];
-        uint8_t previous = prev_frame[i];
-        
-        if (abs((int)current - (int)previous) > threshold) {
-            motion_pixels++;
-        }
-        total_pixels++;
-    }
-    
-    // Update previous frame
-    memcpy(prev_frame, fb->buf, fb->len);
-    
-    // Calculate motion percentage
-    float motion_percentage = (float)motion_pixels / total_pixels * 100.0;
-    
-    // Motion detected if more than 5% of pixels changed
-    if (motion_percentage > 5.0) {
-        motion_count++;
-        last_motion_time = millis();
-        
-        // Flash LED to indicate motion
-        digitalWrite(LED_PIN, HIGH);
-        
-        Serial.printf("🚨 MOTION DETECTED! Pixels changed: %.1f%% (%d/%d)\n", 
-                     motion_percentage, motion_pixels, total_pixels);
-        
-        // Turn off LED after 200ms
-        static unsigned long led_off_time = 0;
-        led_off_time = millis() + 200;
-        
-        return true;
-    }
-    
-    // Turn off LED if enough time passed
-    static unsigned long last_led_check = 0;
-    if (millis() - last_led_check > 100) {
-        if (millis() - last_motion_time > 200) {
-            digitalWrite(LED_PIN, LOW);
-        }
-        last_led_check = millis();
-    }
-    
-    return false;
+// CORS enabled response
+esp_err_t set_cors_headers(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type, Authorization");
+    return ESP_OK;
 }
 
-// Stream handler with motion detection
+// Video stream handler - SIMPLIFIED for stability
 static esp_err_t stream_handler(httpd_req_t *req) {
     camera_fb_t * fb = NULL;
     esp_err_t res = ESP_OK;
@@ -347,35 +65,25 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
     if (res != ESP_OK) return res;
     
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    set_cors_headers(req);
     
-    Serial.println("📹 Stream started");
+    Serial.println("Stream started");
     
     while (true) {
         fb = esp_camera_fb_get();
         if (!fb) {
-            Serial.println("❌ Camera capture failed");
+            Serial.println("Camera capture failed");
             res = ESP_FAIL;
             break;
         }
         
-        // Perform motion detection
-        if (motion_detection_enabled) {
-            detectRealMotion(fb);
-        }
-        
-        // Send stream boundary
         if (res == ESP_OK) {
             res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
         }
-        
-        // Send image headers
         if (res == ESP_OK) {
             size_t hlen = snprintf((char *)part_buf, 64, _STREAM_PART, fb->len);
             res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
         }
-        
-        // Send image data
         if (res == ESP_OK) {
             res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
         }
@@ -385,148 +93,341 @@ static esp_err_t stream_handler(httpd_req_t *req) {
         if (res != ESP_OK) {
             break;
         }
+        
+        delay(80);  // Slightly faster for better stream
     }
     
-    Serial.println("📹 Stream ended");
     return res;
 }
 
-// Control handler
-static esp_err_t cmd_handler(httpd_req_t *req) {
-    char*  buf;
-    size_t buf_len;
-    char variable[32] = {0,};
-    char value[32] = {0,};
-
-    buf_len = httpd_req_get_url_query_len(req) + 1;
-    if (buf_len > 1) {
-        buf = (char*)malloc(buf_len);
-        if(!buf) {
-            httpd_resp_send_500(req);
-            return ESP_FAIL;
-        }
-        if (httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {
-            if (httpd_query_key_value(buf, "var", variable, sizeof(variable)) == ESP_OK &&
-                httpd_query_key_value(buf, "val", value, sizeof(value)) == ESP_OK) {
-            } else {
-                free(buf);
-                httpd_resp_send_404(req);
-                return ESP_FAIL;
-            }
-        } else {
-            free(buf);
-            httpd_resp_send_404(req);
-            return ESP_FAIL;
-        }
-        free(buf);
-    } else {
-        httpd_resp_send_404(req);
+// Single frame capture
+static esp_err_t capture_handler(httpd_req_t *req) {
+    camera_fb_t * fb = NULL;
+    esp_err_t res = ESP_OK;
+    
+    fb = esp_camera_fb_get();
+    if (!fb) {
+        Serial.println("Camera capture failed");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Camera capture failed");
         return ESP_FAIL;
     }
-
-    int val = atoi(value);
     
-    if(!strcmp(variable, "motion_detect")) {
-        motion_detection_enabled = val;
-        Serial.printf("Motion detection %s\n", val ? "ENABLED" : "DISABLED");
-        
-        if (!val) {
-            digitalWrite(LED_PIN, LOW); // Turn off LED when disabled
+    set_cors_headers(req);
+    httpd_resp_set_type(req, "image/jpeg");
+    httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=capture.jpg");
+    
+    res = httpd_resp_send(req, (const char *)fb->buf, fb->len);
+    esp_camera_fb_return(fb);
+    
+    return res;
+}
+
+// Alarm control endpoint
+static esp_err_t alarm_handler(httpd_req_t *req) {
+    char content[200];
+    size_t recv_size = min(req->content_len, sizeof(content));
+    
+    int ret = httpd_req_recv(req, content, recv_size);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to receive data");
+        return ESP_FAIL;
+    }
+    
+    content[ret] = '\0';
+    
+    // Parse JSON command
+    DynamicJsonDocument doc(512);  // Reduced size
+    DeserializationError error = deserializeJson(doc, content);
+    
+    if (error) {
+        Serial.println("Failed to parse JSON");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+    
+    String command = doc["command"];
+    String status = doc["status"];
+    
+    Serial.printf("Command: %s, Status: %s\n", command.c_str(), status.c_str());
+    
+    // Handle alarm commands
+    if (command == "ALARM_ON") {
+        if (!alarm_active) {
+            alarm_active = true;
+            alarm_start_time = millis();
+            total_drowsiness_alerts++;
+            Serial.println("ALARM ACTIVATED!");
+        }
+    } else if (command == "ALARM_OFF") {
+        if (alarm_active) {
+            alarm_active = false;
+            buzzer_state = false;
+            digitalWrite(BUZZER_PIN, LOW);
+            digitalWrite(LED_PIN, LOW);
+            Serial.println("Alarm stopped");
         }
     }
-
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    return httpd_resp_send(req, NULL, 0);
-}
-
-// Status handler
-static esp_err_t status_handler(httpd_req_t *req) {
-    static char json_response[200];
     
-    snprintf(json_response, sizeof(json_response),
-        "{\"motion_detect\":%s,\"motion_count\":%d,\"last_motion\":%lu}",
-        motion_detection_enabled ? "true" : "false",
-        motion_count,
-        last_motion_time
-    );
+    current_detection_status = status;
+    last_detection_time = millis();
     
+    set_cors_headers(req);
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    return httpd_resp_send(req, json_response, strlen(json_response));
+    
+    String response = "{\"status\":\"ok\",\"alarm_active\":" + String(alarm_active ? "true" : "false") + "}";
+    
+    return httpd_resp_send(req, response.c_str(), response.length());
 }
 
-// Index page handler
+// Status endpoint
+static esp_err_t status_handler(httpd_req_t *req) {
+    set_cors_headers(req);
+    httpd_resp_set_type(req, "application/json");
+    
+    String response = "{"
+                     "\"status\":\"online\","
+                     "\"alarm_active\":" + String(alarm_active ? "true" : "false") + ","
+                     "\"total_alerts\":" + String(total_drowsiness_alerts) + ","
+                     "\"free_heap\":" + String(ESP.getFreeHeap()) +
+                     "}";
+    
+    return httpd_resp_send(req, response.c_str(), response.length());
+}
+
+// Test buzzer endpoint
+static esp_err_t test_buzzer_handler(httpd_req_t *req) {
+    Serial.println("Testing buzzer on GPIO 2...");
+    
+    for (int i = 0; i < 3; i++) {
+        digitalWrite(BUZZER_PIN, HIGH);
+        digitalWrite(LED_PIN, HIGH);
+        Serial.printf("Buzzer ON - Test %d\n", i+1);
+        delay(300);
+        digitalWrite(BUZZER_PIN, LOW);
+        digitalWrite(LED_PIN, LOW);
+        Serial.printf("Buzzer OFF - Test %d\n", i+1);
+        delay(300);
+    }
+    
+    set_cors_headers(req);
+    httpd_resp_set_type(req, "application/json");
+    String response = "{\"status\":\"buzzer_test_complete\"}";
+    
+    return httpd_resp_send(req, response.c_str(), response.length());
+}
+
+// Handle OPTIONS for CORS
+static esp_err_t options_handler(httpd_req_t *req) {
+    set_cors_headers(req);
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
+// Updated HTML page with LARGER video display
+static const char PROGMEM INDEX_HTML[] = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ESP32-CAM Test</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { 
+            font-family: Arial; 
+            text-align: center; 
+            margin: 20px; 
+            background: #f5f5f5;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        /* LARGER VIDEO STREAM */
+        img { 
+            width: 100%; 
+            max-width: 640px; 
+            height: auto;
+            border: 3px solid #333; 
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+        }
+        button { 
+            padding: 15px 25px; 
+            margin: 10px; 
+            font-size: 18px; 
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        .status { 
+            background: #ffffff; 
+            padding: 15px; 
+            margin: 15px 0; 
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            font-size: 16px;
+        }
+        .alert {
+            background: #dc3545;
+            color: white;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+        }
+        h3 {
+            color: #555;
+            margin-top: 30px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>ESP32-CAM Mobile Integration</h1>
+        
+        <button onclick="testBuzzer()">🔊 Test Buzzer (GPIO 2)</button>
+        <button onclick="testAlarm()">⚠️ Test Alarm (5s)</button>
+        
+        <div class="status" id="status">Status: Ready - Buzzer on GPIO 2</div>
+        
+        <h3>📹 Live Stream (Larger View)</h3>
+        <img src="/stream" alt="Camera Stream Loading..." id="streamImg">
+        
+        <div class="status">
+            <strong>📡 API Endpoints:</strong><br>
+            Stream: <code>/stream</code> | 
+            Capture: <code>/capture</code> | 
+            Alarm: <code>/alarm</code> | 
+            Status: <code>/status</code>
+        </div>
+    </div>
+    
+    <script>
+        function testBuzzer() {
+            const button = event.target;
+            button.disabled = true;
+            button.textContent = '🔊 Testing...';
+            document.getElementById('status').innerHTML = '<strong>Testing buzzer on GPIO 2...</strong>';
+            
+            fetch('/test-buzzer')
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('status').innerHTML = '<strong>✅ Buzzer test completed!</strong>';
+                button.disabled = false;
+                button.textContent = '🔊 Test Buzzer (GPIO 2)';
+            })
+            .catch(error => {
+                document.getElementById('status').innerHTML = '<strong>❌ Buzzer test failed</strong>';
+                button.disabled = false;
+                button.textContent = '🔊 Test Buzzer (GPIO 2)';
+            });
+        }
+        
+        function testAlarm() {
+            const button = event.target;
+            button.disabled = true;
+            button.textContent = '⚠️ Alarming...';
+            document.getElementById('status').className = 'status alert';
+            document.getElementById('status').innerHTML = '<strong>🚨 ALARM ACTIVE - Testing for 5 seconds...</strong>';
+            
+            fetch('/alarm', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({command: 'ALARM_ON', status: 'Test'})
+            });
+            
+            setTimeout(() => {
+                fetch('/alarm', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({command: 'ALARM_OFF', status: 'Normal'})
+                });
+                document.getElementById('status').className = 'status';
+                document.getElementById('status').innerHTML = '<strong>✅ Alarm test completed!</strong>';
+                button.disabled = false;
+                button.textContent = '⚠️ Test Alarm (5s)';
+            }, 5000);
+        }
+        
+        // Auto-refresh status
+        setInterval(() => {
+            fetch('/status')
+            .then(response => response.json())
+            .then(data => {
+                if (!document.getElementById('status').innerHTML.includes('Testing') && 
+                    !document.getElementById('status').innerHTML.includes('ALARM ACTIVE')) {
+                    document.getElementById('status').innerHTML = 
+                        `<strong>Status:</strong> Online | <strong>Alerts:</strong> ${data.total_alerts} | <strong>Memory:</strong> ${data.free_heap} bytes`;
+                }
+            })
+            .catch(error => console.log('Status update failed'));
+        }, 3000);
+    </script>
+</body>
+</html>
+)rawliteral";
+
 static esp_err_t index_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    return httpd_resp_send(req, (const char *)INDEX_HTML, strlen(INDEX_HTML));
+    return httpd_resp_send(req, INDEX_HTML, strlen(INDEX_HTML));
 }
 
-// Start web server
 void startCameraServer() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.stack_size = 16384;
+    config.stack_size = 8192;  // Reduced stack size
     
-    httpd_uri_t index_uri = {
-        .uri = "/",
-        .method = HTTP_GET,
-        .handler = index_handler,
-        .user_ctx = NULL
-    };
-    
-    httpd_uri_t cmd_uri = {
-        .uri = "/control",
-        .method = HTTP_GET,
-        .handler = cmd_handler,
-        .user_ctx = NULL
-    };
-    
-    httpd_uri_t status_uri = {
-        .uri = "/status",
-        .method = HTTP_GET,
-        .handler = status_handler,
-        .user_ctx = NULL
-    };
-    
-    httpd_uri_t stream_uri = {
-        .uri = "/stream",
-        .method = HTTP_GET,
-        .handler = stream_handler,
-        .user_ctx = NULL
-    };
+    httpd_uri_t index_uri = {.uri = "/", .method = HTTP_GET, .handler = index_handler, .user_ctx = NULL};
+    httpd_uri_t stream_uri = {.uri = "/stream", .method = HTTP_GET, .handler = stream_handler, .user_ctx = NULL};
+    httpd_uri_t capture_uri = {.uri = "/capture", .method = HTTP_GET, .handler = capture_handler, .user_ctx = NULL};
+    httpd_uri_t alarm_uri = {.uri = "/alarm", .method = HTTP_POST, .handler = alarm_handler, .user_ctx = NULL};
+    httpd_uri_t status_uri = {.uri = "/status", .method = HTTP_GET, .handler = status_handler, .user_ctx = NULL};
+    httpd_uri_t test_buzzer_uri = {.uri = "/test-buzzer", .method = HTTP_GET, .handler = test_buzzer_handler, .user_ctx = NULL};
+    httpd_uri_t options_uri = {.uri = "/*", .method = HTTP_OPTIONS, .handler = options_handler, .user_ctx = NULL};
     
     if (httpd_start(&camera_httpd, &config) == ESP_OK) {
         httpd_register_uri_handler(camera_httpd, &index_uri);
-        httpd_register_uri_handler(camera_httpd, &cmd_uri);
-        httpd_register_uri_handler(camera_httpd, &status_uri);
         httpd_register_uri_handler(camera_httpd, &stream_uri);
-        Serial.println("✅ Web server started successfully");
-    } else {
-        Serial.println("❌ Failed to start web server");
+        httpd_register_uri_handler(camera_httpd, &capture_uri);
+        httpd_register_uri_handler(camera_httpd, &alarm_uri);
+        httpd_register_uri_handler(camera_httpd, &status_uri);
+        httpd_register_uri_handler(camera_httpd, &test_buzzer_uri);
+        httpd_register_uri_handler(camera_httpd, &options_uri);
+        Serial.println("HTTP server started");
     }
 }
 
 void setup() {
+    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
     Serial.begin(115200);
-    Serial.println();
-    Serial.println("🚀 ESP32-CAM Real Motion Detection System");
-    Serial.println("==========================================");
+    Serial.setDebugOutput(false);  // Disable debug output to save memory
+    delay(1000);
     
-    // Initialize LED pin
-    pinMode(LED_PIN, OUTPUT);
+    Serial.println("ESP32-CAM Starting...");
+    Serial.println("IMPORTANT: Buzzer moved to GPIO 2 (was GPIO 12)");
+    
+    // Initialize pins - BUZZER NOW ON GPIO 2
+    pinMode(BUZZER_PIN, OUTPUT);  // GPIO 2
+    pinMode(LED_PIN, OUTPUT);     // GPIO 4
+    digitalWrite(BUZZER_PIN, LOW);
     digitalWrite(LED_PIN, LOW);
     
-    // Test LED
-    Serial.println("Testing LED...");
-    for (int i = 0; i < 3; i++) {
-        digitalWrite(LED_PIN, HIGH);
-        delay(200);
-        digitalWrite(LED_PIN, LOW);
-        delay(200);
-    }
+    // Enhanced hardware test with buzzer
+    Serial.println("Testing hardware...");
+    digitalWrite(LED_PIN, HIGH);
+    digitalWrite(BUZZER_PIN, HIGH);
+    Serial.println("LED and Buzzer ON");
+    delay(500);
+    digitalWrite(LED_PIN, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
+    Serial.println("LED and Buzzer OFF");
+    Serial.println("Hardware test complete - If you heard a beep, buzzer works!");
     
-    // Camera configuration
+    // UPDATED camera configuration for LARGER stream
     camera_config_t config;
     config.ledc_channel = LEDC_CHANNEL_0;
     config.ledc_timer = LEDC_TIMER_0;
@@ -549,100 +450,64 @@ void setup() {
     config.xclk_freq_hz = 20000000;
     config.pixel_format = PIXFORMAT_JPEG;
     
-    // Frame size based on PSRAM
-    if(psramFound()){
-        config.frame_size = FRAMESIZE_VGA;
-        config.jpeg_quality = 10;
-        config.fb_count = 2;
-        config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-        Serial.println("✅ PSRAM found - Using VGA resolution");
+    // LARGER resolution for bigger stream window
+    if (psramFound()) {
+        config.frame_size = FRAMESIZE_VGA;     // 640x480 - Much larger!
+        config.jpeg_quality = 10;              // Better quality
+        config.fb_count = 1;                   // Single buffer for stability
+        Serial.println("PSRAM found - Using VGA (640x480) for larger stream");
     } else {
-        config.frame_size = FRAMESIZE_QVGA;
+        config.frame_size = FRAMESIZE_HVGA;    // 480x320 - Larger than before
         config.jpeg_quality = 12;
         config.fb_count = 1;
-        config.grab_mode = CAMERA_GRAB_LATEST;
-        Serial.println("⚠️  No PSRAM - Using QVGA resolution");
+        Serial.println("No PSRAM - Using HVGA (480x320) for larger stream");
     }
     
-    // Initialize camera
+    Serial.println("Initializing camera...");
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
-        Serial.printf("❌ Camera init failed with error 0x%x\n", err);
+        Serial.printf("Camera init failed: 0x%x\n", err);
         return;
     }
+    Serial.println("Camera OK");
     
-    Serial.println("✅ Camera initialized successfully!");
-    
-    // Configure camera sensor
-    sensor_t * s = esp_camera_sensor_get();
-    if (s != NULL) {
-        // Optimize for motion detection
-        s->set_framesize(s, FRAMESIZE_VGA);
-        s->set_quality(s, 12);
-        s->set_brightness(s, 1);
-        s->set_contrast(s, 0);
-        s->set_saturation(s, 0);
-        s->set_gainceiling(s, (gainceiling_t)0);
-        s->set_colorbar(s, 0);
-        s->set_whitebal(s, 1);        // Fixed AWB function
-        s->set_gain_ctrl(s, 1);       // Fixed AGC function  
-        s->set_exposure_ctrl(s, 1);   // Fixed AEC function
-        s->set_hmirror(s, 0);
-        s->set_vflip(s, 0);
-        s->set_awb_gain(s, 1);
-        s->set_agc_gain(s, 0);
-        s->set_aec_value(s, 300);
-        s->set_special_effect(s, 0);
-        s->set_wb_mode(s, 0);
-        s->set_ae_level(s, 0);
-        s->set_dcw(s, 1);
-        s->set_bpc(s, 0);
-        s->set_wpc(s, 1);
-        s->set_raw_gma(s, 1);
-        s->set_lenc(s, 1);
-        
-        Serial.println("✅ Camera sensor configured for motion detection");
-    }
-    
-    // Connect to WiFi
+    // Connect WiFi
     WiFi.begin(ssid, password);
-    Serial.print("Connecting to WiFi");
+    Serial.print("Connecting WiFi");
+    
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
         Serial.print(".");
     }
-    Serial.println();
-    Serial.println("✅ WiFi connected!");
+    Serial.println(" Connected!");
     
-    // Start web server
     startCameraServer();
     
-    Serial.println("==========================================");
-    Serial.print("🌐 Open your browser and go to: http://");
-    Serial.println(WiFi.localIP());
-    Serial.println("==========================================");
-    Serial.println("✨ Features:");
-    Serial.println("• Real-time motion detection");
-    Serial.println("• LED flash on motion");
-    Serial.println("• Live video streaming");
-    Serial.println("• Web interface controls");
-    Serial.println("• Motion statistics");
-    Serial.println("==========================================");
-    Serial.println("🎯 READY! Move in front of camera to test!");
+    Serial.println("========================================");
+    Serial.print("Camera Ready! Use 'http://");
+    Serial.print(WiFi.localIP());
+    Serial.println("' to connect");
+    Serial.println("========================================");
+    Serial.println("🔊 BUZZER IS NOW ON GPIO 2 (not GPIO 12)");
+    Serial.println("📹 STREAM SIZE: VGA (640x480) for larger view");
+    Serial.println("========================================");
 }
 
 void loop() {
-    static unsigned long lastReport = 0;
-    
-    // Report status every 30 seconds
-    if (millis() - lastReport > 30000) {
-        lastReport = millis();
-        Serial.printf("📊 Status: Detection %s | Total motions: %d | Free heap: %d bytes | Uptime: %lu minutes\n",
-                     motion_detection_enabled ? "ON" : "OFF",
-                     motion_count,
-                     ESP.getFreeHeap(),
-                     millis() / 60000);
+    // Handle buzzer alarm with improved pattern
+    if (alarm_active) {
+        unsigned long current_time = millis();
+        if (current_time - last_buzzer_toggle > 400) {  // Slightly faster beeping
+            buzzer_state = !buzzer_state;
+            digitalWrite(BUZZER_PIN, buzzer_state ? HIGH : LOW);
+            digitalWrite(LED_PIN, buzzer_state ? HIGH : LOW);
+            last_buzzer_toggle = current_time;
+            
+            if (buzzer_state) {
+                Serial.println("🔊 BUZZ!");
+            }
+        }
     }
     
-    delay(100);
+    delay(50);
 }

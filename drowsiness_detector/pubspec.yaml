@@ -1,12 +1,16 @@
 name: drowsiness_detector
 description: ESP32-CAM Flutter Drowsiness Detection App
 
+# ADD THIS ENVIRONMENT SECTION:
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: '>=3.0.0'
+
 dependencies:
   flutter:
     sdk: flutter
   camera: ^0.10.5
   http: ^1.1.0
-  tflite_flutter: ^0.10.4
   image: ^4.0.17
   permission_handler: ^11.0.1
   flutter_local_notifications: ^16.1.0
@@ -20,5 +24,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  assets:
-    - assets/model/drowsiness_model.tflite

@@ -167,11 +167,26 @@ class _HomeScreenState extends State<HomeScreen> {
 
             ElevatedButton(
               onPressed: _isConnected
-                  ? () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(builder: (context) => CameraScreen()),
-                      );
+                  ? () async {
+                      // Test API first
+                      _showSnackBar('Testing Roboflow API...');
+                      bool apiWorks = await DrowsinessDetector.testConnection();
+
+                      if (apiWorks) {
+                        _showSnackBar(
+                          'API test successful! Starting detection...',
+                        );
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => CameraScreen(),
+                          ),
+                        );
+                      } else {
+                        _showSnackBar(
+                          'API test failed. Check your internet connection.',
+                        );
+                      }
                     }
                   : null,
               child: Text('Start Detection'),

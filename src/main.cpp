@@ -24,7 +24,7 @@
 #define PCLK_GPIO_NUM     22
 
 // Hardware pins - CHANGED BUZZER PIN!
-#define BUZZER_PIN 13    // Changed from GPIO 12 to GPIO 2 (safe pin)
+#define BUZZER_PIN 13    // Changed from GPIO 12 to GPIO 13 (safe pin)
 #define LED_PIN 4       // GPIO 4 is still fine
 
 // WiFi credentials - UPDATE THESE!

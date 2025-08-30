@@ -1,97 +1,174 @@
 import 'dart:typed_data';
-import 'dart:io';
-import 'package:tflite_flutter/tflite_flutter.dart';
-import 'package:image/image.dart' as img;
+import 'dart:convert';
+import 'package:http/http.dart' as http;
 import '../models/detection_result.dart';
 
 class DrowsinessDetector {
-  static Interpreter? _interpreter;
-  static bool _isInitialized = false;
+  // YOUR ACTUAL ROBOFLOW API DETAILS
+  static const String API_KEY = "kU0QoAFfW5QbD4uwb3p1";
+  static const String API_URL = "https://serverless.roboflow.com";
+  static const String MODEL_ID = "drowsiness-driver/1";
 
-  // Initialize the TensorFlow Lite model
+  static bool _isInitialized = true; // API doesn't need model loading
+
+  // Initialize (just for compatibility)
   static Future<bool> initialize() async {
-    try {
-      // Load the model from assets
-      _interpreter = await Interpreter.fromAsset(
-        'assets/model/drowsiness_model.tflite',
-      );
-      _isInitialized = true;
-      print('Drowsiness detection model loaded successfully');
-      return true;
-    } catch (e) {
-      print('Failed to load model: $e');
-      return false;
-    }
+    print('Using Roboflow Hosted API for drowsiness detection');
+    print('API URL: $API_URL');
+    print('Model: $MODEL_ID');
+    return true;
   }
 
-  // Process image and detect drowsiness
+  // Process image using YOUR Roboflow API
   static Future<DetectionResult?> detectDrowsiness(Uint8List imageBytes) async {
-    if (!_isInitialized || _interpreter == null) {
-      await initialize();
-      if (!_isInitialized) return null;
-    }
-
     try {
-      // Decode image
-      img.Image? image = img.decodeImage(imageBytes);
-      if (image == null) return null;
+      // Convert image to base64
+      String base64Image = base64Encode(imageBytes);
 
-      // Resize image to match model input (adjust size based on your model)
-      image = img.copyResize(image, width: 224, height: 224);
-
-      // Convert to Float32List for model input
-      var input = _imageToByteListFloat32(image, 224, 224);
-
-      // Prepare output tensor
-      var output = List.filled(1 * 2, 0.0).reshape([1, 2]); // [Normal, Drowsy]
-
-      // Run inference
-      _interpreter!.run(input, output);
-
-      // Process results
-      double normalConfidence = output[0][0];
-      double drowsyConfidence = output[0][1];
-
-      bool isDrowsy = drowsyConfidence > normalConfidence;
-      double confidence = isDrowsy ? drowsyConfidence : normalConfidence;
-
-      return DetectionResult(
-        isDrowsy: isDrowsy,
-        confidence: confidence,
-        timestamp: DateTime.now(),
-        status: isDrowsy ? 'Drowsy' : 'Normal',
+      // Prepare API request using Roboflow format
+      var request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$API_URL/$MODEL_ID?api_key=$API_KEY'),
       );
+
+      // Add the image as base64
+      request.fields['image'] = base64Image;
+      request.fields['confidence'] = '0.4'; // 40% confidence threshold
+      request.fields['overlap'] = '30'; // Overlap threshold
+
+      print('Sending image to Roboflow API...');
+
+      // Make API call
+      var streamedResponse = await request.send().timeout(
+        Duration(seconds: 15),
+      );
+      var response = await http.Response.fromStream(streamedResponse);
+
+      if (response.statusCode == 200) {
+        Map<String, dynamic> result = jsonDecode(response.body);
+
+        print('Roboflow response: ${response.body}');
+
+        // Parse Roboflow response
+        List<dynamic> predictions = result['predictions'] ?? [];
+
+        // Analyze predictions for drowsiness
+        bool isDrowsy = false;
+        double maxConfidence = 0.0;
+        String detectedClass = 'Normal';
+        int drowsyCount = 0;
+        int alertCount = 0;
+
+        print('Found ${predictions.length} predictions');
+
+        for (var prediction in predictions) {
+          String className = prediction['class'].toString().toLowerCase();
+          double confidence = prediction['confidence'].toDouble();
+
+          print(
+            'Detection: $className (${(confidence * 100).toStringAsFixed(1)}%)',
+          );
+
+          // Check for drowsiness indicators based on your model classes
+          if (className.contains('drowsy') ||
+              className.contains('sleepy') ||
+              className.contains('tired') ||
+              className.contains('closed') ||
+              className.contains('yawn') ||
+              className.contains('fatigue')) {
+            isDrowsy = true;
+            drowsyCount++;
+
+            if (confidence > maxConfidence) {
+              maxConfidence = confidence;
+              detectedClass = prediction['class'];
+            }
+          } else if (className.contains('alert') ||
+              className.contains('awake') ||
+              className.contains('normal')) {
+            alertCount++;
+
+            if (confidence > maxConfidence && !isDrowsy) {
+              maxConfidence = confidence;
+              detectedClass = prediction['class'];
+            }
+          }
+        }
+
+        // Decision logic
+        if (predictions.isEmpty) {
+          // No face detected
+          maxConfidence = 0.3;
+          detectedClass = 'No Face Detected';
+          isDrowsy = false;
+        } else if (drowsyCount > alertCount) {
+          // More drowsy detections than alert
+          isDrowsy = true;
+        } else if (alertCount > 0) {
+          // Alert state detected
+          isDrowsy = false;
+        }
+
+        print(
+          'Final Decision: ${isDrowsy ? "DROWSY" : "ALERT"} - $detectedClass (${(maxConfidence * 100).toStringAsFixed(1)}%)',
+        );
+
+        return DetectionResult(
+          isDrowsy: isDrowsy,
+          confidence: maxConfidence,
+          timestamp: DateTime.now(),
+          status: isDrowsy
+              ? 'Drowsy - $detectedClass'
+              : 'Alert - $detectedClass',
+        );
+      } else {
+        print('Roboflow API Error: ${response.statusCode}');
+        print('Response body: ${response.body}');
+        return null;
+      }
     } catch (e) {
-      print('Error during inference: $e');
+      print('Error calling Roboflow API: $e');
       return null;
     }
   }
 
-  // Convert image to Float32List for model input
-  static Float32List _imageToByteListFloat32(
-    img.Image image,
-    int width,
-    int height,
-  ) {
-    var convertedBytes = Float32List(1 * width * height * 3);
-    var buffer = Float32List.view(convertedBytes.buffer);
-    int pixelIndex = 0;
+  // Test API connection with a small image
+  static Future<bool> testConnection() async {
+    try {
+      print('Testing Roboflow API connection...');
 
-    for (int i = 0; i < height; i++) {
-      for (int j = 0; j < width; j++) {
-        var pixel = image.getPixel(j, i);
-        buffer[pixelIndex++] = img.getRed(pixel) / 255.0;
-        buffer[pixelIndex++] = img.getGreen(pixel) / 255.0;
-        buffer[pixelIndex++] = img.getBlue(pixel) / 255.0;
+      var request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$API_URL/$MODEL_ID?api_key=$API_KEY'),
+      );
+
+      // Create a minimal test image (black square)
+      String testBase64 =
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+      request.fields['image'] = testBase64;
+
+      var streamedResponse = await request.send().timeout(
+        Duration(seconds: 10),
+      );
+      var response = await http.Response.fromStream(streamedResponse);
+
+      if (response.statusCode == 200) {
+        print('API Connection Test: SUCCESS');
+        print('Response: ${response.body}');
+        return true;
+      } else {
+        print('API Connection Test: FAILED - Status ${response.statusCode}');
+        print('Response: ${response.body}');
+        return false;
       }
+    } catch (e) {
+      print('Connection test failed: $e');
+      return false;
     }
-    return convertedBytes.reshape([1, width, height, 3]);
   }
 
-  // Dispose resources
+  // Dispose (nothing to dispose for API)
   static void dispose() {
-    _interpreter?.close();
-    _interpreter = null;
-    _isInitialized = false;
+    print('Roboflow API detector disposed');
   }
 }

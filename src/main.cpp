@@ -28,8 +28,8 @@
 #define LED_PIN 4       // GPIO 4 is still fine
 
 // WiFi credentials - UPDATE THESE!
-const char* ssid = "SLT FIBRE";
-const char* password = "96132005";
+const char* ssid = "Galaxy A05 2783";
+const char* password = "lahiru123";
 
 httpd_handle_t camera_httpd = NULL;
 

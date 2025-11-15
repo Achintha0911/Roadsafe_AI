@@ -28,8 +28,8 @@
 #define LED_PIN 4       // GPIO 4 is still fine
 
 // WiFi credentials - UPDATE THESE!
-const char* ssid = "Galaxy A05 2783";
-const char* password = "lahiru123";
+const char* ssid = "SLT FIBRE";
+const char* password = "96132005";
 
 httpd_handle_t camera_httpd = NULL;
 
@@ -94,7 +94,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
             break;
         }
         
-        delay(80);  // Slightly faster for better stream
+        delay(10);  // Slightly faster for better stream
     }
     
     return res;
@@ -447,15 +447,15 @@ void setup() {
     config.pin_sscb_scl = SIOC_GPIO_NUM;
     config.pin_pwdn = PWDN_GPIO_NUM;
     config.pin_reset = RESET_GPIO_NUM;
-    config.xclk_freq_hz = 20000000;
+    config.xclk_freq_hz = 24000000; //faster capture
     config.pixel_format = PIXFORMAT_JPEG;
     
     // LARGER resolution for bigger stream window
     if (psramFound()) {
-        config.frame_size = FRAMESIZE_VGA;     // 640x480 - Much larger!
-        config.jpeg_quality = 10;              // Better quality
+        config.frame_size = FRAMESIZE_CIF;     // 400x296 - Higher fps
+        config.jpeg_quality = 20;              // Lower quality higher speed
         config.fb_count = 1;                   // Single buffer for stability
-        Serial.println("PSRAM found - Using VGA (640x480) for larger stream");
+        Serial.println("PSRAM found - Using QVGA (320x240) for Higher fps stream");
     } else {
         config.frame_size = FRAMESIZE_HVGA;    // 480x320 - Larger than before
         config.jpeg_quality = 12;
@@ -489,7 +489,7 @@ void setup() {
     Serial.println("' to connect");
     Serial.println("========================================");
     Serial.println("🔊 BUZZER IS NOW ON GPIO 2 (not GPIO 12)");
-    Serial.println("📹 STREAM SIZE: VGA (640x480) for larger view");
+    Serial.println("📹 STREAM SIZE: CIF (400x296) for faster view");
     Serial.println("========================================");
 }
 

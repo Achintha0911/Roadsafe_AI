@@ -458,6 +458,10 @@ const char camera_html[] PROGMEM = R"rawliteral(
             <span class="status-row"><span id="statusLed" class="status-indicator" style="background:#f87171"></span><span class="value" id="statusText">Loading…</span></span>
         </div>
         <div class="card">
+            <span class="label">Alarm</span>
+            <span class="value" id="alarmStatus">OFF</span>
+        </div>
+        <div class="card">
             <span class="label">WiFi</span>
             <span class="value" id="wifiSsid">-</span>
         </div>
@@ -482,6 +486,8 @@ const char camera_html[] PROGMEM = R"rawliteral(
                 const data = await res.json();
                 document.getElementById('statusText').textContent = data.status || 'online';
                 document.getElementById('statusLed').style.background = data.alarm_active ? '#fb923c' : '#34d399';
+                document.getElementById('alarmStatus').textContent = data.alarm_active ? 'ACTIVE' : 'OFF';
+                document.getElementById('alarmStatus').style.color = data.alarm_active ? '#fb923c' : '#34d399';
                 document.getElementById('wifiSsid').textContent = data.wifi_ssid || '-';
                 document.getElementById('ipAddr').textContent = data.ip || '-';
                 document.getElementById('alerts').textContent = data.alerts ?? '-';
@@ -619,7 +625,7 @@ static esp_err_t capture_handler(httpd_req_t *req) {
     return res;
 }
 
-// ======================== ALARM HANDLER ========================
+// ======================== ALARM HANDLER (FIXED!) ========================
 static esp_err_t alarm_handler(httpd_req_t *req) {
     char content[200];
     int ret = httpd_req_recv(req, content, sizeof(content));
@@ -631,18 +637,81 @@ static esp_err_t alarm_handler(httpd_req_t *req) {
 
     String command = doc["command"];
 
+    Serial.println("");
+    Serial.println("========================================");
+    Serial.printf("📡 ALARM HANDLER: Received command: %s\n", command.c_str());
+    Serial.println("========================================");
+
     if (command == "ALARM_ON") {
         alarm_active = true;
         total_drowsiness_alerts++;
+        alarm_start_time = millis();
+        
+        Serial.println("🚨 ALARM ACTIVATED!");
+        Serial.printf("   Total alerts: %d\n", total_drowsiness_alerts);
+        Serial.printf("   Buzzer Pin: %d\n", BUZZER_PIN);
+        Serial.printf("   LED Pin: %d\n", LED_PIN);
+        
+        // Immediately turn on buzzer and LED
+        digitalWrite(BUZZER_PIN, HIGH);
+        digitalWrite(LED_PIN, HIGH);
+        buzzer_state = true;
+        last_buzzer_toggle = millis();
+        
+        Serial.println("🔊 BUZZER ON (immediate)");
+        
     } else if (command == "ALARM_OFF") {
         alarm_active = false;
+        
+        Serial.println("🔇 ALARM DEACTIVATED!");
+        
+        // Immediately turn off buzzer and LED
         digitalWrite(BUZZER_PIN, LOW);
         digitalWrite(LED_PIN, LOW);
+        buzzer_state = false;
+        
+        Serial.println("🔊 BUZZER OFF");
     }
+
+    Serial.println("========================================");
+    Serial.println("");
 
     set_cors_headers(req);
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, "{\"status\":\"ok\"}", strlen("{\"status\":\"ok\"}"));
+    
+    String response = "{\"status\":\"ok\",\"alarm_active\":" + String(alarm_active ? "true" : "false") + "}";
+    return httpd_resp_send(req, response.c_str(), response.length());
+}
+
+// ======================== TEST ALARM HANDLER (NEW - FOR DEBUGGING) ========================
+static esp_err_t test_alarm_handler(httpd_req_t *req) {
+    set_cors_headers(req);
+    
+    Serial.println("\n🧪 ========================================");
+    Serial.println("🧪 TEST ALARM TRIGGERED");
+    Serial.println("🧪 ========================================");
+    Serial.printf("   Buzzer Pin: %d\n", BUZZER_PIN);
+    Serial.printf("   LED Pin: %d\n", LED_PIN);
+    
+    // Test sequence: 3 beeps
+    for (int i = 0; i < 3; i++) {
+        Serial.printf("   Beep %d: ON\n", i + 1);
+        digitalWrite(BUZZER_PIN, HIGH);
+        digitalWrite(LED_PIN, HIGH);
+        delay(300);
+        
+        Serial.printf("   Beep %d: OFF\n", i + 1);
+        digitalWrite(BUZZER_PIN, LOW);
+        digitalWrite(LED_PIN, LOW);
+        delay(300);
+    }
+    
+    Serial.println("🧪 Test completed!");
+    Serial.println("🧪 ========================================\n");
+    
+    String response = "{\"test\":\"completed\",\"buzzer_pin\":13,\"led_pin\":4,\"beeps\":3}";
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, response.c_str(), response.length());
 }
 
 // ======================== STATUS HANDLER ========================
@@ -657,6 +726,8 @@ static esp_err_t status_handler(httpd_req_t *req) {
     json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
     json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
     json += "\"udp_discovery\":" + String(discoveryEnabled ? "true" : "false") + ",";
+    json += "\"buzzer_pin\":" + String(BUZZER_PIN) + ",";
+    json += "\"buzzer_state\":" + String(buzzer_state ? "true" : "false") + ",";
     json += "\"free_heap\":" + String(ESP.getFreeHeap());
     json += "}";
 
@@ -687,6 +758,7 @@ void startCameraServer() {
     httpd_uri_t stream_uri = {"/stream", HTTP_GET, stream_handler, NULL};
     httpd_uri_t capture_uri = {"/capture", HTTP_GET, capture_handler, NULL};
     httpd_uri_t alarm_uri = {"/alarm", HTTP_POST, alarm_handler, NULL};
+    httpd_uri_t test_alarm_uri = {"/test_alarm", HTTP_GET, test_alarm_handler, NULL};
     httpd_uri_t status_uri = {"/status", HTTP_GET, status_handler, NULL};
     httpd_uri_t index_uri = {"/", HTTP_GET, index_handler, NULL};
 
@@ -695,7 +767,16 @@ void startCameraServer() {
         httpd_register_uri_handler(camera_httpd, &stream_uri);
         httpd_register_uri_handler(camera_httpd, &capture_uri);
         httpd_register_uri_handler(camera_httpd, &alarm_uri);
+        httpd_register_uri_handler(camera_httpd, &test_alarm_uri);
         httpd_register_uri_handler(camera_httpd, &status_uri);
+        
+        Serial.println("✅ Camera server started with endpoints:");
+        Serial.println("   GET  /");
+        Serial.println("   GET  /stream");
+        Serial.println("   GET  /capture");
+        Serial.println("   POST /alarm");
+        Serial.println("   GET  /test_alarm  ← TEST BUZZER");
+        Serial.println("   GET  /status");
     }
 }
 
@@ -739,15 +820,11 @@ void initCamera() {
     config.pin_pwdn = PWDN_GPIO_NUM;
     config.pin_reset = RESET_GPIO_NUM;
 
-    // ============================================
-    // OPTIMIZED FOR 25-30 FPS!
-    // ============================================
-    config.xclk_freq_hz = 20000000;        // 20MHz for better performance
+    config.xclk_freq_hz = 20000000;
     config.pixel_format = PIXFORMAT_JPEG;
-    config.frame_size = FRAMESIZE_QVGA;    // 320x240 - FAST!
-    config.jpeg_quality = 12;              // Good balance
-    config.fb_count = 2;                   // Double buffering
-    // ============================================
+    config.frame_size = FRAMESIZE_QVGA;
+    config.jpeg_quality = 12;
+    config.fb_count = 2;
 
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
@@ -755,7 +832,6 @@ void initCamera() {
         return;
     }
 
-    // Sensor optimizations
     sensor_t * s = esp_camera_sensor_get();
     s->set_brightness(s, 0);
     s->set_contrast(s, 0);
@@ -776,25 +852,39 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
+    Serial.println("\n\n================================");
+    Serial.println("  RoadSafe AI - ESP32-CAM");
+    Serial.println("  Drowsiness Detection System");
+    Serial.println("  WITH UDP DISCOVERY & BUZZER");
+    Serial.println("================================\n");
+
+    // Initialize buzzer and LED pins
     pinMode(BUZZER_PIN, OUTPUT);
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
     digitalWrite(LED_PIN, LOW);
+    
+    Serial.printf("✓ Buzzer initialized on Pin %d\n", BUZZER_PIN);
+    Serial.printf("✓ LED initialized on Pin %d\n", LED_PIN);
+    
+    // Test buzzer on startup (3 quick beeps)
+    Serial.println("\n🔊 Testing buzzer on startup...");
+    for (int i = 0; i < 3; i++) {
+        digitalWrite(BUZZER_PIN, HIGH);
+        digitalWrite(LED_PIN, HIGH);
+        delay(100);
+        digitalWrite(BUZZER_PIN, LOW);
+        digitalWrite(LED_PIN, LOW);
+        delay(100);
+    }
+    Serial.println("✓ Buzzer test complete\n");
 
 #if defined(RESET_BUTTON_PIN) && RESET_BUTTON_PIN >= 0
     pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
 #endif
 
-    Serial.println("\n\n================================");
-    Serial.println("  RoadSafe AI - ESP32-CAM");
-    Serial.println("  Drowsiness Detection System");
-    Serial.println("  WITH UDP DISCOVERY");
-    Serial.println("================================\n");
-
-    // Initialize camera first
     initCamera();
 
-    // Try to load saved WiFi credentials
     if (loadWiFiCredentials()) {
         Serial.println("✓ Found saved WiFi credentials");
         Serial.print("  SSID: ");
@@ -820,15 +910,18 @@ void setup() {
             Serial.print(WiFi.RSSI());
             Serial.println(" dBm");
 
-            // Start UDP Discovery
             setupUDPDiscovery();
-
             startCameraServer();
 
             Serial.println("\n========================================");
             Serial.println("  CAMERA STREAM READY!");
             Serial.print("  http://");
             Serial.println(WiFi.localIP());
+            Serial.println("========================================");
+            Serial.println("\n🧪 To test buzzer, visit:");
+            Serial.print("  http://");
+            Serial.print(WiFi.localIP());
+            Serial.println("/test_alarm");
             Serial.println("========================================\n");
         } else {
             Serial.println("✗ Failed to connect to saved WiFi");
@@ -837,7 +930,6 @@ void setup() {
             ESP.restart();
         }
     } else {
-        // No saved credentials - start AP mode
         Serial.println("ℹ No WiFi configured - Starting setup mode");
         
         WiFi.mode(WIFI_AP);
@@ -859,19 +951,39 @@ void setup() {
     }
 }
 
-// ======================== LOOP ========================
+// ======================== LOOP (FIXED!) ========================
 void loop() {
     // Handle UDP Discovery packets
     handleUDPDiscovery();
 
-    // Alarm handling
+    // ============================================
+    // IMPROVED ALARM/BUZZER HANDLING
+    // ============================================
     if (alarm_active) {
-        unsigned long t = millis();
-        if (t - last_buzzer_toggle > 400) {
+        unsigned long currentTime = millis();
+        
+        // Toggle buzzer every 400ms (beep pattern)
+        if (currentTime - last_buzzer_toggle >= 400) {
             buzzer_state = !buzzer_state;
-            digitalWrite(BUZZER_PIN, buzzer_state);
-            digitalWrite(LED_PIN, buzzer_state);
-            last_buzzer_toggle = t;
+            
+            if (buzzer_state) {
+                digitalWrite(BUZZER_PIN, HIGH);
+                digitalWrite(LED_PIN, HIGH);
+                // Uncomment for debugging:
+                // Serial.println("🔊 BEEP");
+            } else {
+                digitalWrite(BUZZER_PIN, LOW);
+                digitalWrite(LED_PIN, LOW);
+            }
+            
+            last_buzzer_toggle = currentTime;
+        }
+    } else {
+        // Ensure buzzer is OFF when alarm is not active
+        if (buzzer_state) {
+            digitalWrite(BUZZER_PIN, LOW);
+            digitalWrite(LED_PIN, LOW);
+            buzzer_state = false;
         }
     }
 

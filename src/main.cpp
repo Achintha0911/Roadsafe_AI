@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "esp_camera.h"
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include "esp_http_server.h"
 #include <ArduinoJson.h>
 #include "soc/rtc_cntl_reg.h"
@@ -34,6 +35,13 @@
 #define AP_PASSWORD "12345678"
 #define WIFI_TIMEOUT 30000  // 30 seconds
 
+// ======================== UDP DISCOVERY CONFIGURATION ========================
+#define DISCOVERY_PORT 9999
+#define DEVICE_NAME "RoadSafe-AI-ESP32CAM"
+
+WiFiUDP udp;
+bool discoveryEnabled = false;
+
 Preferences preferences;
 String saved_ssid = "";
 String saved_password = "";
@@ -51,6 +59,64 @@ unsigned long last_buzzer_toggle = 0;
 int total_drowsiness_alerts = 0;
 String current_detection_status = "Normal";
 unsigned long last_detection_time = 0;
+
+// ====================== UDP DISCOVERY FUNCTIONS ======================
+
+void setupUDPDiscovery() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("⚠️ Cannot start UDP discovery - not connected to WiFi");
+        return;
+    }
+
+    if (udp.begin(DISCOVERY_PORT)) {
+        discoveryEnabled = true;
+        Serial.println("\n========================================");
+        Serial.println("📡 UDP DISCOVERY ENABLED");
+        Serial.println("========================================");
+        Serial.printf("  Listening on port: %d\n", DISCOVERY_PORT);
+        Serial.printf("  Device name: %s\n", DEVICE_NAME);
+        Serial.printf("  IP address: %s\n", WiFi.localIP().toString().c_str());
+        Serial.println("========================================\n");
+    } else {
+        Serial.println("❌ UDP Discovery setup failed!");
+        discoveryEnabled = false;
+    }
+}
+
+void handleUDPDiscovery() {
+    if (!discoveryEnabled) return;
+
+    int packetSize = udp.parsePacket();
+    if (packetSize) {
+        // Read incoming packet
+        char incomingPacket[255];
+        int len = udp.read(incomingPacket, 255);
+        if (len > 0) {
+            incomingPacket[len] = '\0';
+        }
+
+        String message = String(incomingPacket);
+        
+        // Check if it's a discovery request
+        if (message == "ROADSAFE_DISCOVER") {
+            Serial.println("\n📡 Discovery request received!");
+            Serial.printf("   From: %s:%d\n", udp.remoteIP().toString().c_str(), udp.remotePort());
+
+            // Prepare response with IP address
+            String response = "ROADSAFE_RESPONSE:";
+            response += WiFi.localIP().toString();
+            response += ":";
+            response += DEVICE_NAME;
+
+            // Send response back to requester
+            udp.beginPacket(udp.remoteIP(), udp.remotePort());
+            udp.write((uint8_t*)response.c_str(), response.length());
+            udp.endPacket();
+
+            Serial.printf("   Sent: %s\n", response.c_str());
+        }
+    }
+}
 
 // ====================== HELPER FUNCTIONS ======================
 esp_err_t set_cors_headers(httpd_req_t *req) {
@@ -481,6 +547,10 @@ static esp_err_t connect_handler(httpd_req_t *req) {
     String response;
     if (WiFi.status() == WL_CONNECTED) {
         saveWiFiCredentials(ssid, password);
+        
+        // Start UDP discovery after WiFi connection
+        setupUDPDiscovery();
+        
         response = "{\"success\":true,\"ip\":\"" + WiFi.localIP().toString() + "\"}";
     } else {
         response = "{\"success\":false,\"message\":\"Failed to connect\"}";
@@ -586,6 +656,7 @@ static esp_err_t status_handler(httpd_req_t *req) {
     json += "\"wifi_ssid\":\"" + WiFi.SSID() + "\",";
     json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
     json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
+    json += "\"udp_discovery\":" + String(discoveryEnabled ? "true" : "false") + ",";
     json += "\"free_heap\":" + String(ESP.getFreeHeap());
     json += "}";
 
@@ -711,12 +782,13 @@ void setup() {
     digitalWrite(LED_PIN, LOW);
 
 #if defined(RESET_BUTTON_PIN) && RESET_BUTTON_PIN >= 0
-    pinMode(RESET_BUTTON_PIN, INPUT_PULLUP); // keep input high when button absent
+    pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
 #endif
 
     Serial.println("\n\n================================");
     Serial.println("  RoadSafe AI - ESP32-CAM");
     Serial.println("  Drowsiness Detection System");
+    Serial.println("  WITH UDP DISCOVERY");
     Serial.println("================================\n");
 
     // Initialize camera first
@@ -747,6 +819,9 @@ void setup() {
             Serial.print("  Signal: ");
             Serial.print(WiFi.RSSI());
             Serial.println(" dBm");
+
+            // Start UDP Discovery
+            setupUDPDiscovery();
 
             startCameraServer();
 
@@ -786,6 +861,9 @@ void setup() {
 
 // ======================== LOOP ========================
 void loop() {
+    // Handle UDP Discovery packets
+    handleUDPDiscovery();
+
     // Alarm handling
     if (alarm_active) {
         unsigned long t = millis();

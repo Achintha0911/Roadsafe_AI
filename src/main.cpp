@@ -27,7 +27,6 @@
 
 // ======================== HARDWARE PINS ========================
 #define BUZZER_PIN 13
-#define LED_PIN 4
 #define RESET_BUTTON_PIN 12  // Optional: Hold for 5s to reset WiFi
 
 // ======================== WiFi Configuration ========================
@@ -88,7 +87,6 @@ void handleUDPDiscovery() {
 
     int packetSize = udp.parsePacket();
     if (packetSize) {
-        // Read incoming packet
         char incomingPacket[255];
         int len = udp.read(incomingPacket, 255);
         if (len > 0) {
@@ -97,18 +95,15 @@ void handleUDPDiscovery() {
 
         String message = String(incomingPacket);
         
-        // Check if it's a discovery request
         if (message == "ROADSAFE_DISCOVER") {
             Serial.println("\n📡 Discovery request received!");
             Serial.printf("   From: %s:%d\n", udp.remoteIP().toString().c_str(), udp.remotePort());
 
-            // Prepare response with IP address
             String response = "ROADSAFE_RESPONSE:";
             response += WiFi.localIP().toString();
             response += ":";
             response += DEVICE_NAME;
 
-            // Send response back to requester
             udp.beginPacket(udp.remoteIP(), udp.remotePort());
             udp.write((uint8_t*)response.c_str(), response.length());
             udp.endPacket();
@@ -356,7 +351,6 @@ const char setup_html[] PROGMEM = R"rawliteral(
     </div>
 
     <script>
-        // Scan for WiFi networks
         fetch('/scan')
             .then(response => response.json())
             .then(data => {
@@ -376,7 +370,6 @@ const char setup_html[] PROGMEM = R"rawliteral(
                     '<p style="color: #f44336;">Failed to scan networks. Please refresh the page.</p>';
             });
 
-        // Handle form submission
         document.getElementById('wifiForm').addEventListener('submit', function(e) {
             e.preventDefault();
             
@@ -541,7 +534,6 @@ static esp_err_t connect_handler(httpd_req_t *req) {
     set_cors_headers(req);
     httpd_resp_set_type(req, "application/json");
 
-    // Try to connect
     WiFi.begin(ssid.c_str(), password.c_str());
     
     int attempts = 0;
@@ -553,10 +545,7 @@ static esp_err_t connect_handler(httpd_req_t *req) {
     String response;
     if (WiFi.status() == WL_CONNECTED) {
         saveWiFiCredentials(ssid, password);
-        
-        // Start UDP discovery after WiFi connection
         setupUDPDiscovery();
-        
         response = "{\"success\":true,\"ip\":\"" + WiFi.localIP().toString() + "\"}";
     } else {
         response = "{\"success\":false,\"message\":\"Failed to connect\"}";
@@ -625,65 +614,110 @@ static esp_err_t capture_handler(httpd_req_t *req) {
     return res;
 }
 
-// ======================== ALARM HANDLER (FIXED!) ========================
+// ======================== ALARM HANDLER (ENHANCED) ========================
 static esp_err_t alarm_handler(httpd_req_t *req) {
+    unsigned long start_time = millis();
+    
+    Serial.println("");
+    Serial.println("╔════════════════════════════════════════╗");
+    Serial.println("║   ALARM REQUEST RECEIVED               ║");
+    Serial.println("╚════════════════════════════════════════╝");
+    Serial.printf("⏰ Time: %lu ms\n", start_time);
+    Serial.printf("📡 Method: %s\n", req->method == HTTP_POST ? "POST" : "GET");
+    Serial.printf("📍 URI: %s\n", req->uri);
+    Serial.printf("📦 Content Length: %d\n", req->content_len);
+    
     char content[200];
     int ret = httpd_req_recv(req, content, sizeof(content));
-    if (ret <= 0) return ESP_FAIL;
+    
+    if (ret <= 0) {
+        Serial.println("❌ ERROR: Failed to receive request body");
+        Serial.printf("   Return code: %d\n", ret);
+        return ESP_FAIL;
+    }
+    
     content[ret] = '\0';
+    Serial.printf("📄 Body received: %s\n", content);
+    Serial.printf("   Length: %d bytes\n", ret);
 
     DynamicJsonDocument doc(512);
-    deserializeJson(doc, content);
+    DeserializationError error = deserializeJson(doc, content);
+    
+    if (error) {
+        Serial.println("❌ ERROR: JSON parsing failed");
+        Serial.printf("   Error: %s\n", error.c_str());
+        Serial.printf("   Raw content: %s\n", content);
+        return ESP_FAIL;
+    }
 
     String command = doc["command"];
-
-    Serial.println("");
-    Serial.println("========================================");
-    Serial.printf("📡 ALARM HANDLER: Received command: %s\n", command.c_str());
-    Serial.println("========================================");
+    Serial.printf("🎯 Command parsed: '%s'\n", command.c_str());
 
     if (command == "ALARM_ON") {
+        Serial.println("");
+        Serial.println("🚨 ═══════════════════════════════════");
+        Serial.println("🚨  ACTIVATING ALARM");
+        Serial.println("🚨 ═══════════════════════════════════");
+        
         alarm_active = true;
         total_drowsiness_alerts++;
         alarm_start_time = millis();
         
-        Serial.println("🚨 ALARM ACTIVATED!");
-        Serial.printf("   Total alerts: %d\n", total_drowsiness_alerts);
-        Serial.printf("   Buzzer Pin: %d\n", BUZZER_PIN);
-        Serial.printf("   LED Pin: %d\n", LED_PIN);
+        Serial.printf("   Alert count: %d\n", total_drowsiness_alerts);
+        Serial.printf("   Buzzer pin: %d\n", BUZZER_PIN);
         
-        // Immediately turn on buzzer and LED
+        // IMMEDIATE activation
         digitalWrite(BUZZER_PIN, HIGH);
-        digitalWrite(LED_PIN, HIGH);
         buzzer_state = true;
         last_buzzer_toggle = millis();
         
-        Serial.println("🔊 BUZZER ON (immediate)");
+        Serial.println("   🔊 BUZZER: ON");
+        Serial.println("🚨 ═══════════════════════════════════");
         
     } else if (command == "ALARM_OFF") {
+        Serial.println("");
+        Serial.println("🔇 ═══════════════════════════════════");
+        Serial.println("🔇  DEACTIVATING ALARM");
+        Serial.println("🔇 ═══════════════════════════════════");
+        
         alarm_active = false;
         
-        Serial.println("🔇 ALARM DEACTIVATED!");
-        
-        // Immediately turn off buzzer and LED
+        // IMMEDIATE deactivation
         digitalWrite(BUZZER_PIN, LOW);
-        digitalWrite(LED_PIN, LOW);
         buzzer_state = false;
         
-        Serial.println("🔊 BUZZER OFF");
+        Serial.println("   🔊 BUZZER: OFF");
+        Serial.println("🔇 ═══════════════════════════════════");
+        
+    } else {
+        Serial.println("⚠️ WARNING: Unknown command");
+        Serial.printf("   Received: '%s'\n", command.c_str());
     }
 
-    Serial.println("========================================");
     Serial.println("");
-
+    
     set_cors_headers(req);
     httpd_resp_set_type(req, "application/json");
     
-    String response = "{\"status\":\"ok\",\"alarm_active\":" + String(alarm_active ? "true" : "false") + "}";
+    String response = "{\"status\":\"ok\",\"alarm_active\":" + 
+                     String(alarm_active ? "true" : "false") + 
+                     ",\"buzzer_state\":" + 
+                     String(buzzer_state ? "true" : "false") + 
+                     ",\"command_received\":\"" + command + "\"}";
+    
+    Serial.printf("📤 Sending response: %s\n", response.c_str());
+    
+    unsigned long end_time = millis();
+    Serial.printf("⏱️ Total processing time: %lu ms\n", end_time - start_time);
+    Serial.println("╔════════════════════════════════════════╗");
+    Serial.println("║   REQUEST COMPLETE                     ║");
+    Serial.println("╚════════════════════════════════════════╝");
+    Serial.println("");
+    
     return httpd_resp_send(req, response.c_str(), response.length());
 }
 
-// ======================== TEST ALARM HANDLER (NEW - FOR DEBUGGING) ========================
+// ======================== TEST ALARM HANDLER (NEW!) ========================
 static esp_err_t test_alarm_handler(httpd_req_t *req) {
     set_cors_headers(req);
     
@@ -691,25 +725,22 @@ static esp_err_t test_alarm_handler(httpd_req_t *req) {
     Serial.println("🧪 TEST ALARM TRIGGERED");
     Serial.println("🧪 ========================================");
     Serial.printf("   Buzzer Pin: %d\n", BUZZER_PIN);
-    Serial.printf("   LED Pin: %d\n", LED_PIN);
     
     // Test sequence: 3 beeps
     for (int i = 0; i < 3; i++) {
         Serial.printf("   Beep %d: ON\n", i + 1);
         digitalWrite(BUZZER_PIN, HIGH);
-        digitalWrite(LED_PIN, HIGH);
         delay(300);
         
         Serial.printf("   Beep %d: OFF\n", i + 1);
         digitalWrite(BUZZER_PIN, LOW);
-        digitalWrite(LED_PIN, LOW);
         delay(300);
     }
     
     Serial.println("🧪 Test completed!");
     Serial.println("🧪 ========================================\n");
     
-    String response = "{\"test\":\"completed\",\"buzzer_pin\":13,\"led_pin\":4,\"beeps\":3}";
+    String response = "{\"test\":\"completed\",\"buzzer_pin\":13,\"beeps\":3}";
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, response.c_str(), response.length());
 }
@@ -775,7 +806,7 @@ void startCameraServer() {
         Serial.println("   GET  /stream");
         Serial.println("   GET  /capture");
         Serial.println("   POST /alarm");
-        Serial.println("   GET  /test_alarm  ← TEST BUZZER");
+        Serial.println("   GET  /test_alarm  ← TEST BUZZER HERE");
         Serial.println("   GET  /status");
     }
 }
@@ -858,23 +889,18 @@ void setup() {
     Serial.println("  WITH UDP DISCOVERY & BUZZER");
     Serial.println("================================\n");
 
-    // Initialize buzzer and LED pins
+    // Initialize buzzer pin
     pinMode(BUZZER_PIN, OUTPUT);
-    pinMode(LED_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
-    digitalWrite(LED_PIN, LOW);
     
     Serial.printf("✓ Buzzer initialized on Pin %d\n", BUZZER_PIN);
-    Serial.printf("✓ LED initialized on Pin %d\n", LED_PIN);
     
     // Test buzzer on startup (3 quick beeps)
     Serial.println("\n🔊 Testing buzzer on startup...");
     for (int i = 0; i < 3; i++) {
         digitalWrite(BUZZER_PIN, HIGH);
-        digitalWrite(LED_PIN, HIGH);
         delay(100);
         digitalWrite(BUZZER_PIN, LOW);
-        digitalWrite(LED_PIN, LOW);
         delay(100);
     }
     Serial.println("✓ Buzzer test complete\n");
@@ -951,43 +977,33 @@ void setup() {
     }
 }
 
-// ======================== LOOP (FIXED!) ========================
+// ======================== LOOP ========================
 void loop() {
-    // Handle UDP Discovery packets
     handleUDPDiscovery();
 
-    // ============================================
-    // IMPROVED ALARM/BUZZER HANDLING
-    // ============================================
+    // Alarm/buzzer handling
     if (alarm_active) {
         unsigned long currentTime = millis();
         
-        // Toggle buzzer every 400ms (beep pattern)
         if (currentTime - last_buzzer_toggle >= 400) {
             buzzer_state = !buzzer_state;
             
             if (buzzer_state) {
                 digitalWrite(BUZZER_PIN, HIGH);
-                digitalWrite(LED_PIN, HIGH);
-                // Uncomment for debugging:
-                // Serial.println("🔊 BEEP");
             } else {
                 digitalWrite(BUZZER_PIN, LOW);
-                digitalWrite(LED_PIN, LOW);
             }
             
             last_buzzer_toggle = currentTime;
         }
     } else {
-        // Ensure buzzer is OFF when alarm is not active
         if (buzzer_state) {
             digitalWrite(BUZZER_PIN, LOW);
-            digitalWrite(LED_PIN, LOW);
             buzzer_state = false;
         }
     }
 
-    // Optional: Check for reset button (hold for 5 seconds)
+    // Reset button check
     #if defined(RESET_BUTTON_PIN) && RESET_BUTTON_PIN >= 0
     static unsigned long buttonPressTime = 0;
     static bool buttonPressed = false;

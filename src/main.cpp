@@ -31,7 +31,7 @@
 
 // ======================== WiFi Configuration ========================
 #define AP_SSID "RoadSafe-AI-Setup"
-#define AP_PASSWORD "12345678"
+#define AP_PASSWORD "1234567800"
 #define WIFI_TIMEOUT 30000
 
 // ======================== UDP DISCOVERY ========================

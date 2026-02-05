@@ -27,14 +27,14 @@
 
 // ======================== HARDWARE PINS ========================
 #define BUZZER_PIN 13
-#define RESET_BUTTON_PIN 12  // Optional: Hold for 5s to reset WiFi
+#define RESET_BUTTON_PIN 12
 
 // ======================== WiFi Configuration ========================
 #define AP_SSID "RoadSafe-AI-Setup"
 #define AP_PASSWORD "12345678"
-#define WIFI_TIMEOUT 30000  // 30 seconds
+#define WIFI_TIMEOUT 30000
 
-// ======================== UDP DISCOVERY CONFIGURATION ========================
+// ======================== UDP DISCOVERY ========================
 #define DISCOVERY_PORT 9999
 #define DEVICE_NAME "RoadSafe-AI-ESP32CAM"
 
@@ -54,13 +54,14 @@ bool alarm_active = false;
 unsigned long alarm_start_time = 0;
 bool buzzer_state = false;
 unsigned long last_buzzer_toggle = 0;
-
 int total_drowsiness_alerts = 0;
-String current_detection_status = "Normal";
-unsigned long last_detection_time = 0;
 
-// ====================== UDP DISCOVERY FUNCTIONS ======================
+// Forward declarations
+void startCameraServer();
+void startConfigServer();
+void initCamera();
 
+// ====================== UDP DISCOVERY ======================
 void setupUDPDiscovery() {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("⚠️ Cannot start UDP discovery - not connected to WiFi");
@@ -96,9 +97,6 @@ void handleUDPDiscovery() {
         String message = String(incomingPacket);
         
         if (message == "ROADSAFE_DISCOVER") {
-            Serial.println("\n📡 Discovery request received!");
-            Serial.printf("   From: %s:%d\n", udp.remoteIP().toString().c_str(), udp.remotePort());
-
             String response = "ROADSAFE_RESPONSE:";
             response += WiFi.localIP().toString();
             response += ":";
@@ -107,8 +105,6 @@ void handleUDPDiscovery() {
             udp.beginPacket(udp.remoteIP(), udp.remotePort());
             udp.write((uint8_t*)response.c_str(), response.length());
             udp.endPacket();
-
-            Serial.printf("   Sent: %s\n", response.c_str());
         }
     }
 }
@@ -121,7 +117,7 @@ esp_err_t set_cors_headers(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// ====================== WiFi CREDENTIALS STORAGE ======================
+// ====================== WiFi CREDENTIALS ======================
 void saveWiFiCredentials(String ssid, String password) {
     preferences.begin("wifi", false);
     preferences.putString("ssid", ssid);
@@ -148,7 +144,7 @@ void clearWiFiCredentials() {
     Serial.println("✓ WiFi credentials cleared!");
 }
 
-// ====================== WiFi SETUP PAGE HTML ======================
+// ====================== SETUP PAGE HTML ======================
 const char setup_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -181,14 +177,8 @@ const char setup_html[] PROGMEM = R"rawliteral(
             padding: 30px;
             text-align: center;
         }
-        .header h1 {
-            font-size: 28px;
-            margin-bottom: 10px;
-        }
-        .header p {
-            opacity: 0.9;
-            font-size: 14px;
-        }
+        .header h1 { font-size: 28px; margin-bottom: 10px; }
+        .header p { opacity: 0.9; font-size: 14px; }
         .icon {
             width: 60px;
             height: 60px;
@@ -200,12 +190,8 @@ const char setup_html[] PROGMEM = R"rawliteral(
             justify-content: center;
             font-size: 30px;
         }
-        .content {
-            padding: 30px;
-        }
-        .form-group {
-            margin-bottom: 20px;
-        }
+        .content { padding: 30px; }
+        .form-group { margin-bottom: 20px; }
         label {
             display: block;
             margin-bottom: 8px;
@@ -241,9 +227,6 @@ const char setup_html[] PROGMEM = R"rawliteral(
         .btn:hover {
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-        }
-        .btn:active {
-            transform: translateY(0);
         }
         .scanning {
             text-align: center;
@@ -292,20 +275,6 @@ const char setup_html[] PROGMEM = R"rawliteral(
             font-size: 13px;
             line-height: 1.5;
         }
-        .password-toggle {
-            position: relative;
-        }
-        .toggle-btn {
-            position: absolute;
-            right: 12px;
-            top: 50%;
-            transform: translateY(-50%);
-            background: none;
-            border: none;
-            cursor: pointer;
-            font-size: 18px;
-            padding: 5px;
-        }
     </style>
 </head>
 <body>
@@ -336,11 +305,8 @@ const char setup_html[] PROGMEM = R"rawliteral(
 
                 <div class="form-group">
                     <label for="password">Password</label>
-                    <div class="password-toggle">
-                        <input type="password" id="password" name="password" 
-                               placeholder="Enter WiFi password" required>
-                        <button type="button" class="toggle-btn" onclick="togglePassword()">👁️</button>
-                    </div>
+                    <input type="password" id="password" name="password" 
+                           placeholder="Enter WiFi password" required>
                 </div>
 
                 <button type="submit" class="btn">Connect to WiFi</button>
@@ -390,10 +356,7 @@ const char setup_html[] PROGMEM = R"rawliteral(
             .then(data => {
                 if (data.success) {
                     statusDiv.className = 'status success';
-                    statusDiv.innerHTML = `✓ Connected successfully!<br>IP: ${data.ip}<br>Redirecting...`;
-                    setTimeout(() => {
-                        window.location.href = `http://${data.ip}`;
-                    }, 3000);
+                    statusDiv.innerHTML = `✓ Connected successfully!<br>IP: ${data.ip}<br><strong>Camera server is starting...</strong><br>Return to the app now!`;
                 } else {
                     statusDiv.className = 'status error';
                     statusDiv.textContent = '✗ Connection failed: ' + data.message;
@@ -404,38 +367,61 @@ const char setup_html[] PROGMEM = R"rawliteral(
                 statusDiv.textContent = '✗ Error: ' + error.message;
             });
         });
-
-        function togglePassword() {
-            const input = document.getElementById('password');
-            input.type = input.type === 'password' ? 'text' : 'password';
-        }
     </script>
 </body>
 </html>
 )rawliteral";
 
-// ====================== MAIN CAMERA PAGE HTML ======================
+// ====================== CAMERA PAGE HTML ======================
 const char camera_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RoadSafe AI - Live Feed</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 30px 15px; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; 
+            margin: 0; 
+            background: #0f172a; 
+            color: #e2e8f0; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            min-height: 100vh; 
+            padding: 30px 15px; 
+        }
         h1 { margin-bottom: 5px; }
         p { margin-top: 0; color: #94a3b8; }
-        .frame { max-width: 100%; width: 420px; border-radius: 14px; box-shadow: 0 18px 40px rgba(15,23,42,0.6); overflow: hidden; background: #1e293b; border: 1px solid #334155; }
+        .frame { 
+            max-width: 100%; 
+            width: 420px; 
+            border-radius: 14px; 
+            box-shadow: 0 18px 40px rgba(15,23,42,0.6); 
+            overflow: hidden; 
+            background: #1e293b; 
+            border: 1px solid #334155; 
+        }
         img { width: 100%; display: block; }
         .stats { margin-top: 24px; display: grid; gap: 12px; width: 420px; max-width: 100%; }
-        .card { padding: 16px 18px; border-radius: 12px; background: #1e293b; border: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }
+        .card { 
+            padding: 16px 18px; 
+            border-radius: 12px; 
+            background: #1e293b; 
+            border: 1px solid #334155; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+        }
         .label { color: #94a3b8; font-size: 14px; }
         .value { font-size: 18px; font-weight: 600; }
-        @media (max-width: 480px) {
-            body { padding: 20px 12px; }
+        .status-indicator { 
+            width: 12px; 
+            height: 12px; 
+            border-radius: 50%; 
+            margin-right: 8px; 
         }
-        .status-indicator { width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
         .status-row { display: flex; align-items: center; }
     </style>
 </head>
@@ -443,12 +429,15 @@ const char camera_html[] PROGMEM = R"rawliteral(
     <h1>RoadSafe AI</h1>
     <p>Live stream from ESP32-CAM</p>
     <div class="frame">
-        <img id="stream" src="/stream" alt="Live stream" loading="lazy"/>
+        <img id="stream" src="/stream" alt="Live stream"/>
     </div>
     <div class="stats">
         <div class="card">
             <span class="label">Status</span>
-            <span class="status-row"><span id="statusLed" class="status-indicator" style="background:#f87171"></span><span class="value" id="statusText">Loading…</span></span>
+            <span class="status-row">
+                <span id="statusLed" class="status-indicator" style="background:#f87171"></span>
+                <span class="value" id="statusText">Loading…</span>
+            </span>
         </div>
         <div class="card">
             <span class="label">Alarm</span>
@@ -497,7 +486,7 @@ const char camera_html[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-// ====================== SCAN NETWORKS HANDLER ======================
+// ====================== SCAN HANDLER ======================
 static esp_err_t scan_handler(httpd_req_t *req) {
     set_cors_headers(req);
     
@@ -518,7 +507,7 @@ static esp_err_t scan_handler(httpd_req_t *req) {
     return httpd_resp_send(req, json.c_str(), json.length());
 }
 
-// ====================== CONNECT HANDLER ======================
+// ====================== CONNECT HANDLER (FULLY FIXED!) ======================
 static esp_err_t connect_handler(httpd_req_t *req) {
     char content[200];
     int ret = httpd_req_recv(req, content, sizeof(content));
@@ -534,41 +523,98 @@ static esp_err_t connect_handler(httpd_req_t *req) {
     set_cors_headers(req);
     httpd_resp_set_type(req, "application/json");
 
+    Serial.println("\n🔗 ======================================");
+    Serial.println("🔗 WIFI CONNECTION REQUEST");
+    Serial.println("🔗 ======================================");
+    Serial.printf("   SSID: %s\n", ssid.c_str());
+    Serial.println("   Attempting connection...");
+
+    // Disconnect from AP mode first
+    WiFi.mode(WIFI_STA);
     WiFi.begin(ssid.c_str(), password.c_str());
     
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 20) {
         delay(500);
+        Serial.print(".");
         attempts++;
     }
+    Serial.println();
 
     String response;
     if (WiFi.status() == WL_CONNECTED) {
+        String newIP = WiFi.localIP().toString();
+        
+        Serial.println("✅ ======================================");
+        Serial.println("✅ WIFI CONNECTED SUCCESSFULLY!");
+        Serial.println("✅ ======================================");
+        Serial.printf("   New IP: %s\n", newIP.c_str());
+        Serial.printf("   Signal: %d dBm\n", WiFi.RSSI());
+        Serial.println("✅ ======================================");
+        
+        // Save credentials
         saveWiFiCredentials(ssid, password);
+        
+        response = "{\"success\":true,\"ip\":\"" + newIP + "\"}";
+        
+        // Send response BEFORE stopping server
+        httpd_resp_send(req, response.c_str(), response.length());
+        
+        Serial.println("\n⏳ Switching to camera mode...");
+        
+        // Wait for response to be sent
+        delay(500);
+        
+        // Stop config server
+        if (config_httpd != NULL) {
+            httpd_stop(config_httpd);
+            config_httpd = NULL;
+            Serial.println("✓ Config server stopped");
+        }
+        
+        // Small delay to ensure clean transition
+        delay(500);
+        
+        // Re-initialize camera for station mode
+        Serial.println("🔄 Re-initializing camera...");
+        esp_camera_deinit();
+        delay(100);
+        initCamera();
+        
+        // Setup UDP discovery
         setupUDPDiscovery();
-        response = "{\"success\":true,\"ip\":\"" + WiFi.localIP().toString() + "\"}";
+        
+        // Start camera server
+        startCameraServer();
+        
+        Serial.println("\n📹 ======================================");
+        Serial.println("📹 CAMERA SERVER ACTIVE!");
+        Serial.printf("   Stream: http://%s/stream\n", newIP.c_str());
+        Serial.printf("   Status: http://%s/status\n", newIP.c_str());
+        Serial.println("📹 ======================================\n");
+        
+        return ESP_OK;
+        
     } else {
+        Serial.println("❌ Failed to connect to WiFi");
         response = "{\"success\":false,\"message\":\"Failed to connect\"}";
+        return httpd_resp_send(req, response.c_str(), response.length());
     }
-
-    return httpd_resp_send(req, response.c_str(), response.length());
 }
 
-// ====================== SETUP PAGE HANDLER ======================
+// ====================== HANDLERS ======================
 static esp_err_t setup_handler(httpd_req_t *req) {
     set_cors_headers(req);
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, setup_html, strlen(setup_html));
 }
 
-// ====================== INDEX PAGE HANDLER ======================
 static esp_err_t index_handler(httpd_req_t *req) {
     set_cors_headers(req);
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, camera_html, strlen(camera_html));
 }
 
-// ======================== STREAM HANDLER ========================
 static esp_err_t stream_handler(httpd_req_t *req) {
     camera_fb_t * fb = NULL;
     esp_err_t res = ESP_OK;
@@ -601,7 +647,6 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     return res;
 }
 
-// ======================== CAPTURE HANDLER ========================
 static esp_err_t capture_handler(httpd_req_t *req) {
     camera_fb_t * fb = esp_camera_fb_get();
     if (!fb) return ESP_FAIL;
@@ -614,138 +659,55 @@ static esp_err_t capture_handler(httpd_req_t *req) {
     return res;
 }
 
-// ======================== ALARM HANDLER (ENHANCED) ========================
 static esp_err_t alarm_handler(httpd_req_t *req) {
-    unsigned long start_time = millis();
-    
-    Serial.println("");
-    Serial.println("╔════════════════════════════════════════╗");
-    Serial.println("║   ALARM REQUEST RECEIVED               ║");
-    Serial.println("╚════════════════════════════════════════╝");
-    Serial.printf("⏰ Time: %lu ms\n", start_time);
-    Serial.printf("📡 Method: %s\n", req->method == HTTP_POST ? "POST" : "GET");
-    Serial.printf("📍 URI: %s\n", req->uri);
-    Serial.printf("📦 Content Length: %d\n", req->content_len);
-    
     char content[200];
     int ret = httpd_req_recv(req, content, sizeof(content));
-    
-    if (ret <= 0) {
-        Serial.println("❌ ERROR: Failed to receive request body");
-        Serial.printf("   Return code: %d\n", ret);
-        return ESP_FAIL;
-    }
-    
+    if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
-    Serial.printf("📄 Body received: %s\n", content);
-    Serial.printf("   Length: %d bytes\n", ret);
 
     DynamicJsonDocument doc(512);
-    DeserializationError error = deserializeJson(doc, content);
-    
-    if (error) {
-        Serial.println("❌ ERROR: JSON parsing failed");
-        Serial.printf("   Error: %s\n", error.c_str());
-        Serial.printf("   Raw content: %s\n", content);
-        return ESP_FAIL;
-    }
+    deserializeJson(doc, content);
 
     String command = doc["command"];
-    Serial.printf("🎯 Command parsed: '%s'\n", command.c_str());
 
     if (command == "ALARM_ON") {
-        Serial.println("");
-        Serial.println("🚨 ═══════════════════════════════════");
-        Serial.println("🚨  ACTIVATING ALARM");
-        Serial.println("🚨 ═══════════════════════════════════");
-        
         alarm_active = true;
         total_drowsiness_alerts++;
-        alarm_start_time = millis();
-        
-        Serial.printf("   Alert count: %d\n", total_drowsiness_alerts);
-        Serial.printf("   Buzzer pin: %d\n", BUZZER_PIN);
-        
-        // IMMEDIATE activation
         digitalWrite(BUZZER_PIN, HIGH);
         buzzer_state = true;
-        last_buzzer_toggle = millis();
-        
-        Serial.println("   🔊 BUZZER: ON");
-        Serial.println("🚨 ═══════════════════════════════════");
-        
+        Serial.println("🚨 ALARM ON");
     } else if (command == "ALARM_OFF") {
-        Serial.println("");
-        Serial.println("🔇 ═══════════════════════════════════");
-        Serial.println("🔇  DEACTIVATING ALARM");
-        Serial.println("🔇 ═══════════════════════════════════");
-        
         alarm_active = false;
-        
-        // IMMEDIATE deactivation
         digitalWrite(BUZZER_PIN, LOW);
         buzzer_state = false;
-        
-        Serial.println("   🔊 BUZZER: OFF");
-        Serial.println("🔇 ═══════════════════════════════════");
-        
-    } else {
-        Serial.println("⚠️ WARNING: Unknown command");
-        Serial.printf("   Received: '%s'\n", command.c_str());
+        Serial.println("🔇 ALARM OFF");
     }
 
-    Serial.println("");
-    
     set_cors_headers(req);
     httpd_resp_set_type(req, "application/json");
     
     String response = "{\"status\":\"ok\",\"alarm_active\":" + 
-                     String(alarm_active ? "true" : "false") + 
-                     ",\"buzzer_state\":" + 
-                     String(buzzer_state ? "true" : "false") + 
-                     ",\"command_received\":\"" + command + "\"}";
-    
-    Serial.printf("📤 Sending response: %s\n", response.c_str());
-    
-    unsigned long end_time = millis();
-    Serial.printf("⏱️ Total processing time: %lu ms\n", end_time - start_time);
-    Serial.println("╔════════════════════════════════════════╗");
-    Serial.println("║   REQUEST COMPLETE                     ║");
-    Serial.println("╚════════════════════════════════════════╝");
-    Serial.println("");
+                     String(alarm_active ? "true" : "false") + "}";
     
     return httpd_resp_send(req, response.c_str(), response.length());
 }
 
-// ======================== TEST ALARM HANDLER (NEW!) ========================
 static esp_err_t test_alarm_handler(httpd_req_t *req) {
     set_cors_headers(req);
     
-    Serial.println("\n🧪 ========================================");
-    Serial.println("🧪 TEST ALARM TRIGGERED");
-    Serial.println("🧪 ========================================");
-    Serial.printf("   Buzzer Pin: %d\n", BUZZER_PIN);
-    
-    // Test sequence: 3 beeps
+    Serial.println("🧪 Testing buzzer...");
     for (int i = 0; i < 3; i++) {
-        Serial.printf("   Beep %d: ON\n", i + 1);
         digitalWrite(BUZZER_PIN, HIGH);
         delay(300);
-        
-        Serial.printf("   Beep %d: OFF\n", i + 1);
         digitalWrite(BUZZER_PIN, LOW);
         delay(300);
     }
     
-    Serial.println("🧪 Test completed!");
-    Serial.println("🧪 ========================================\n");
-    
-    String response = "{\"test\":\"completed\",\"buzzer_pin\":13,\"beeps\":3}";
+    String response = "{\"test\":\"completed\"}";
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, response.c_str(), response.length());
 }
 
-// ======================== STATUS HANDLER ========================
 static esp_err_t status_handler(httpd_req_t *req) {
     set_cors_headers(req);
 
@@ -755,18 +717,13 @@ static esp_err_t status_handler(httpd_req_t *req) {
     json += "\"alerts\":" + String(total_drowsiness_alerts) + ",";
     json += "\"wifi_ssid\":\"" + WiFi.SSID() + "\",";
     json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
-    json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-    json += "\"udp_discovery\":" + String(discoveryEnabled ? "true" : "false") + ",";
-    json += "\"buzzer_pin\":" + String(BUZZER_PIN) + ",";
-    json += "\"buzzer_state\":" + String(buzzer_state ? "true" : "false") + ",";
-    json += "\"free_heap\":" + String(ESP.getFreeHeap());
+    json += "\"rssi\":" + String(WiFi.RSSI());
     json += "}";
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json.c_str(), json.length());
 }
 
-// ====================== RESET WIFI HANDLER ======================
 static esp_err_t reset_handler(httpd_req_t *req) {
     set_cors_headers(req);
     clearWiFiCredentials();
@@ -780,7 +737,7 @@ static esp_err_t reset_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// ======================== START CAMERA SERVER ========================
+// ======================== START SERVERS ========================
 void startCameraServer() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
@@ -801,17 +758,12 @@ void startCameraServer() {
         httpd_register_uri_handler(camera_httpd, &test_alarm_uri);
         httpd_register_uri_handler(camera_httpd, &status_uri);
         
-        Serial.println("✅ Camera server started with endpoints:");
-        Serial.println("   GET  /");
-        Serial.println("   GET  /stream");
-        Serial.println("   GET  /capture");
-        Serial.println("   POST /alarm");
-        Serial.println("   GET  /test_alarm  ← TEST BUZZER HERE");
-        Serial.println("   GET  /status");
+        Serial.println("✅ Camera server started");
+    } else {
+        Serial.println("❌ Failed to start camera server!");
     }
 }
 
-// ======================== START CONFIG SERVER ========================
 void startConfigServer() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
@@ -826,6 +778,8 @@ void startConfigServer() {
         httpd_register_uri_handler(config_httpd, &scan_uri);
         httpd_register_uri_handler(config_httpd, &connect_uri);
         httpd_register_uri_handler(config_httpd, &reset_uri);
+        
+        Serial.println("✅ Config server started");
     }
 }
 
@@ -859,7 +813,7 @@ void initCamera() {
 
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
-        Serial.printf("Camera init failed: 0x%x\n", err);
+        Serial.printf("❌ Camera init failed: 0x%x\n", err);
         return;
     }
 
@@ -867,14 +821,8 @@ void initCamera() {
     s->set_brightness(s, 0);
     s->set_contrast(s, 0);
     s->set_saturation(s, 0);
-    s->set_whitebal(s, 1);
-    s->set_awb_gain(s, 1);
-    s->set_exposure_ctrl(s, 1);
-    s->set_gain_ctrl(s, 1);
-    s->set_lenc(s, 1);
-    s->set_dcw(s, 1);
 
-    Serial.println("✓ Camera initialized (QVGA 25-30 FPS mode)");
+    Serial.println("✓ Camera initialized");
 }
 
 // ======================== SETUP ========================
@@ -883,93 +831,65 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
-    Serial.println("\n\n================================");
+    Serial.println("\n================================");
     Serial.println("  RoadSafe AI - ESP32-CAM");
-    Serial.println("  Drowsiness Detection System");
-    Serial.println("  WITH UDP DISCOVERY & BUZZER");
+    Serial.println("  AUTO-START FIXED VERSION");
     Serial.println("================================\n");
 
-    // Initialize buzzer pin
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
-    
-    Serial.printf("✓ Buzzer initialized on Pin %d\n", BUZZER_PIN);
-    
-    // Test buzzer on startup (3 quick beeps)
-    Serial.println("\n🔊 Testing buzzer on startup...");
-    for (int i = 0; i < 3; i++) {
-        digitalWrite(BUZZER_PIN, HIGH);
-        delay(100);
-        digitalWrite(BUZZER_PIN, LOW);
-        delay(100);
-    }
-    Serial.println("✓ Buzzer test complete\n");
-
-#if defined(RESET_BUTTON_PIN) && RESET_BUTTON_PIN >= 0
-    pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
-#endif
+    Serial.printf("✓ Buzzer on Pin %d\n", BUZZER_PIN);
 
     initCamera();
 
     if (loadWiFiCredentials()) {
-        Serial.println("✓ Found saved WiFi credentials");
+        Serial.println("✓ Saved WiFi found");
         Serial.print("  SSID: ");
         Serial.println(saved_ssid);
-        Serial.println("  Connecting...");
 
         WiFi.mode(WIFI_STA);
         WiFi.begin(saved_ssid.c_str(), saved_password.c_str());
 
         unsigned long startAttempt = millis();
-        while (WiFi.status() != WL_CONNECTED && 
-               millis() - startAttempt < WIFI_TIMEOUT) {
+        while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < WIFI_TIMEOUT) {
             delay(500);
             Serial.print(".");
         }
         Serial.println();
 
         if (WiFi.status() == WL_CONNECTED) {
-            Serial.println("✓ Connected to WiFi!");
-            Serial.print("  IP Address: ");
+            Serial.println("✅ Connected!");
+            Serial.print("  IP: ");
             Serial.println(WiFi.localIP());
-            Serial.print("  Signal: ");
-            Serial.print(WiFi.RSSI());
-            Serial.println(" dBm");
 
             setupUDPDiscovery();
             startCameraServer();
 
             Serial.println("\n========================================");
-            Serial.println("  CAMERA STREAM READY!");
+            Serial.println("  CAMERA READY!");
             Serial.print("  http://");
             Serial.println(WiFi.localIP());
-            Serial.println("========================================");
-            Serial.println("\n🧪 To test buzzer, visit:");
-            Serial.print("  http://");
-            Serial.print(WiFi.localIP());
-            Serial.println("/test_alarm");
             Serial.println("========================================\n");
         } else {
-            Serial.println("✗ Failed to connect to saved WiFi");
-            Serial.println("  Starting setup mode...");
+            Serial.println("✗ Connection failed");
             clearWiFiCredentials();
             ESP.restart();
         }
     } else {
-        Serial.println("ℹ No WiFi configured - Starting setup mode");
+        Serial.println("ℹ Setup mode");
         
         WiFi.mode(WIFI_AP);
         WiFi.softAP(AP_SSID, AP_PASSWORD);
         
         IPAddress IP = WiFi.softAPIP();
         Serial.println("\n========================================");
-        Serial.println("  SETUP MODE ACTIVE");
+        Serial.println("  SETUP MODE");
         Serial.println("========================================");
         Serial.print("  Network: ");
         Serial.println(AP_SSID);
         Serial.print("  Password: ");
         Serial.println(AP_PASSWORD);
-        Serial.print("  Setup URL: http://");
+        Serial.print("  URL: http://");
         Serial.println(IP);
         Serial.println("========================================\n");
 
@@ -981,19 +901,11 @@ void setup() {
 void loop() {
     handleUDPDiscovery();
 
-    // Alarm/buzzer handling
     if (alarm_active) {
         unsigned long currentTime = millis();
-        
         if (currentTime - last_buzzer_toggle >= 400) {
             buzzer_state = !buzzer_state;
-            
-            if (buzzer_state) {
-                digitalWrite(BUZZER_PIN, HIGH);
-            } else {
-                digitalWrite(BUZZER_PIN, LOW);
-            }
-            
+            digitalWrite(BUZZER_PIN, buzzer_state ? HIGH : LOW);
             last_buzzer_toggle = currentTime;
         }
     } else {
@@ -1002,25 +914,6 @@ void loop() {
             buzzer_state = false;
         }
     }
-
-    // Reset button check
-    #if defined(RESET_BUTTON_PIN) && RESET_BUTTON_PIN >= 0
-    static unsigned long buttonPressTime = 0;
-    static bool buttonPressed = false;
-    
-    if (digitalRead(RESET_BUTTON_PIN) == LOW) {
-        if (!buttonPressed) {
-            buttonPressed = true;
-            buttonPressTime = millis();
-        } else if (millis() - buttonPressTime > 5000) {
-            Serial.println("Reset button held - Clearing WiFi...");
-            clearWiFiCredentials();
-            ESP.restart();
-        }
-    } else {
-        buttonPressed = false;
-    }
-    #endif
 
     delay(10);
 }
